@@ -1,358 +1,61 @@
 // ============================================================
-//  tab5_analog v1.0 — M5Tab5 アナログシンセサイザー
+//  tab5_analog v2.0 — M5Tab5 アナログシンセサイザー
 //  Author: かずとも / KAZUTOMO
 //  License: MIT (see LICENSE)
 //
 //  M5Stack Tab5 単体で動く減算合成アナログ風シンセサイザー。
-//  音は内蔵スピーカーからソフトウェア合成で生成し、M5 Unit
-//  8Encoder の物理つまみで音作りをします。5 ボイス
-//  (POLY / MONO / UNISON)、プリセットの SD 保存、フレーズ
-//  録音の ABC 記譜書き出し、内蔵マイクによるサンプリング
-//  (鍵盤でピッチ再生、SD 保存・起動時読み込み) を搭載。
+//  音は内蔵スピーカー (またはヘッドホン端子) へソフトウェア
+//  合成で生成し、M5 Unit 8Encoder の物理つまみで音作りを
+//  する。5 ボイス (POLY / MONO / UNISON)、工場プリセット
+//  16 音色 + SD 保存の USER 16 音色、フレーズ録音の ABC
+//  記譜書き出し、内蔵マイクのサンプリング (鍵盤でピッチ
+//  再生、SD 保存・起動時読み込み)、USB MIDI キーボード
+//  対応 (Tab5 の USB-A ポート) を搭載。
 //
-//  必要ライブラリ: M5Unified (M5GFX を含む)
-//  ボード: M5Tab5 (Arduino IDE のボードマネージャから)
+//  ■ 必要なもの
+//    M5Stack Tab5 (C145) / Tab5 Kit (K145)
+//    M5Stack Unit 8Encoder (U153) — Tab5 の PORT.A へ接続
+//    microSD カード (FAT32) — USER 保存・ABC・サンプル用
+//    USB MIDI キーボード (任意) — USB-A ポートへ接続
+//      動作確認済み: KORG microKEY-25
 //
-//  配線: Unit 8Encoder (U153) を Tab5 の PORT.A へ接続。
-//  注意: 8Encoder は電源投入直後の I2C アクセスで固まる
-//  ため、本スケッチは起動後約 10 秒間 I2C を一切触りませ
-//  ん (その間も鍵盤は弾けます)。詳細は末尾の開発履歴へ。
-// ============================================================
-//  以下、開発履歴 (フェーズ毎の変更メモ)
-// ============================================================
-//  tab5_analog Phase 5r7 : playRaw バッファ上書きバグの修正
-// ------------------------------------------------------------
-//  5r7 の変更点 (2026-11-15):
-//  真因が判明 (M5Unified Speaker_Class のソースで確認):
-//  playRaw はデータをコピーせず、ポインタをキューに入れる
-//  だけ。スピーカータスクはそのバッファを非同期に読む。
-//  本スケッチは A/B 2 バッファを交互に使っていたが、playRaw
-//  が true を返した直後 (まだ読み終わっていない) に次の次
-//  のチャンクを同じバッファへ描いていたため、再生中の
-//  チャンクの未読部分が新しいデータで上書きされ、音が欠落
-//  していた。持続音では目立たず、声だけが飛んで早口に聞
-//  こえる。spos 等のレンダ側の数値が全て正常だった理由も
-//  これで説明がつく。対策 (公式ドキュメントのパターン):
-//  (1) playRaw のチャンネルを 0 に固定する (従来は自動割当)
-//  (2) バッファへ描く前に、チャンネル 0 の占有が 2 未満
-//      (前の要求が読み終わった状態) になるまで待つ
-// ------------------------------------------------------------
-//  5r6 の変更点 (2026-11-15):
-//  (1) 起動時に SD の /sample.wav があれば読み込んで使える
-//      ようにした (Hirouchi さんの要望、USER バンクと同じ
-//      考え方)。電源を切ってもサンプルが残り、起動直後から
-//      MIC OK 表示でそのまま弾ける。PCM16 WAV (モノラル/
-//      ステレオ、レートはヘッダから取得) に対応。
-//  (2) 再生方式を変更: 録音/読込の時点で 44.1kHz バッファ
-//      (g_smp44) へ変換しておき、再生中は 1:1 で読むだけ
-//      にした。再生中の逐次リサンプリング (線形補間→区間
-//      平均と変えてきた部分) を完全に排し、直接再生
-//      (playRaw) と同じ条件にそろえる最終形。
-//  5r5 までの対策 (SVF/ノイズ/リバーブ/GAIN のバイパス、
-//  ゲートエンベロープ) は全て維持。
-// ------------------------------------------------------------
-//  5r5 の変更点 (2026-11-15):
-//  5r4 でも聞こえ方は変わらず。数値面は全て正常 (spos は
-//  毎秒 +15920、trigs 不変、note=60、録音データ正常、直接
-//  再生正常)。残る差は「音量と残響」: 鍵盤経路のサンプルは
-//  ADSR のサステイン (0.80) × リバーブのドライ減衰 ×
-//  MASTER_GAIN (0.6) で直接再生の約 0.44 倍まで落ち、弱い
-//  音節が埋もれる。対策としてサンプル経路を直接再生と
-//  等価な条件にそろえる:
-//  (1) エンベロープは ADSR でなく単純ゲート (5ms で 1.0、
-//      保持中 1.0、離鍵 30ms 減衰)
-//  (2) リバーブと MASTER_GAIN はオシレータ側だけに掛け、
-//      サンプルは別バスでドライ・等音量に合算する
-//  フィルタ/ノイズのバイパスと区間平均 (5r3/5r4) は維持。
-// ------------------------------------------------------------
-//  5r4 の変更点 (2026-11-15):
-//  5r3 の動画解析ではテンポは正常化 (約 2.4 秒に母音 5 つが
-//  約 0.5 秒間隔、声の高さも自然な約 150Hz)。それでも聞き
-//  取りにくさが残るため、サンプル経路の音質を 2 点改善:
-//  (1) ノイズ混合をオシレータ専用に戻す。5r3 でもノイズは
-//      全経路共通で、SAW LEAD の NOISE 20% が声にヒスとし
-//      て被っていた。
-//  (2) サンプル読み取りを線形補間 (飛ばし読み) から区間
-//      平均に変更。16kHz → 44.1kHz では出力 1 サンプルあ
-//      たり入力を約 2.77 個進めるため、点だけ拾うと折り返
-//      し雑音で声が金属的に潰れる。進む区間を平均すると
-//      簡易アンチエイリアスになる (inc >= 0.9 の高音域は
-//      従来の線形補間のまま)。
-// ------------------------------------------------------------
-//  5r3 の変更点 (2026-11-15):
-//  [SMPL] ログで再生位置は完全に正常と確定 (毎秒 +15920、
-//  len で正しくラップ、長押し中 trigs 不変 = 再トリガなし)。
-//  残る症状「全部は再現されない」の真犯人は SVF: SAW LEAD
-//  の LFO がカットオフを周期的に揺らし (設計上の「弱いビブ
-//  ラート的揺れ」)、下がった瞬間に言葉が消えていた。動画
-//  の鍵盤再生も約 0.54 秒周期の断片化を確認。対策:
-//  (1) サンプル再生時は SVF をバイパスしドライで通す
-//      (フィルタとその変調はオシレータ専用に戻す)
-//  (2) 録音後にピーク正規化 (30000 へ、最大 x8)。静かな
-//      録音 (peak=7128 の回) でも小さい音節が埋もれない
-// ------------------------------------------------------------
-//  Phase 5r2 の変更点 (2026-11-14):
-//  実測で録音データ (16kHz / recMs=4020) と録音直後の直接
-//  再生が正常と確定したため、残る容疑は「鍵盤を押している
-//  間にタッチの一瞬の欠落で同音が OFF→ON し、サンプルが
-//  先頭から再トリガされ続けている」こと。対策として、
-//  (1) 同音の OFF から 150ms 以内の ON はドロップアウトと
-//  みなして再トリガせず、リリース中のボイスをそのまま再
-//  ゲートする (再生位置 spos は保持される)。
-//  (2) 切り分け用に [SMPL] ログを 1 秒毎に出す (spos の
-//  進み方と trigs = 実トリガ回数)。
-// ------------------------------------------------------------
-//  Phase 5r の変更点 (2026-11-14):
-//  実機で C4 再生が速すぎる問題への対策。録音にかかった実
-//  時間 (recMs) から「実際に届いたサンプルレート」を逆算し
-//  (g_smpEffRate)、再生速度と WAV ヘッダに使う。録音デー
-//  タ側のレートずれならこれで自動的に合う。あわせて切り分
-//  け用に、録音直後にバッファを playRaw で直接 1 回再生す
-//  る (単体テストと同じ経路)。直接再生が正常で鍵盤再生だ
-//  け速ければエンジン側、両方速ければ録音データ側の問題。
-// ------------------------------------------------------------
-//  Phase 5 の変更点 (2026-11-14):
-//  トランスポート帯右端に MIC ボタンを追加。タップすると
-//  音声タスクを止めて内蔵マイクで 4 秒録音 (16kHz、PSRAM
-//  バッファ、末尾の無音はトリム) し、SD に /sample.wav も
-//  保存する。WAVE つまみに第 4 ゾーン SAMPLE (0.84 以上) を
-//  追加し、録った音を鍵盤でピッチ再生 (C4 で原音、ループ
-//  再生、ベンド/グライドも効く)。既存プリセットの波形値
-//  (0.0 / 0.5) は従来どおり SAW / SQUARE のまま不変。
-//  手順 (Speaker.end → Mic → Speaker.begin) は単体テスト
-//  tab5_analog_mic_test で実機確認済みのものをそのまま使う。
-// ------------------------------------------------------------
-//  4b の変更点 (2026-11-14):
-//  鍵盤下にトランスポート帯を追加 (REC/STOP ボタン、BPM の
-//  - / + 、録音状態)。演奏を時刻付きイベントで記録し、STOP
-//  で SD に ABC 記譜法テキストを書き出す (連番 /phrase.abc,
-//  /phrase2.abc ...)。変換は tab5_synth Phase 9 の方式を
-//  移植: BPM 基準で 16 分音符に丸め、和音は [CEG]、小節を
-//  またぐ音はタイでつなぐ。MONO/UNISON では実際に鳴って
-//  いる 1 音だけを残す (新しく押した音で前を閉じる)。
-//  BPM は記譜の基準専用で、音や録音自体には影響しない。
-// ------------------------------------------------------------
-//  4r の変更点 (2026-11-14, Hirouchi の選択):
-//  実機でダブルプッシュが安定しなかった (ボタン読みが
-//  ポーリング周期 ≒350ms に 1 回で、速い連打の段階を取り
-//  こぼす) ため、プリセットバンク切替はヘッダの画面ボタン
-//  (SAMPLE / USER) に変更。あわせて:
-//  (1) 短押しのモード循環を「離した瞬間に即確定」に戻した
-//      (ダブル判定の 500ms 待ちを廃止)。
-//  (2) 長押し (900ms) の保存はそのまま。
-//  (3) 役目を終えた全ボタン表示用の読み (4 回に 1 回の追加
-//      読み) を削除し、ボタンのサンプリング間隔を均した。
-// ------------------------------------------------------------
-//  Phase 4 前半の変更点 (2026-11-14):
-//  (1) つまみ 8 のプッシュを 3 種に完成させた (設計どおり):
-//      短押し = 発音モード循環 (ダブル判定のため最大 500ms 遅延)、
-//      ダブル = プリセットバンク SAMPLE/USER 切替、
-//      長押し (900ms) = 現在の音を USER の同番号スロットへ保存。
-//  (2) USER バンクを SD に保存 (/analog_user.bin、マジック
-//      "U8P1" + 保存フラグ 8 + Params 8 個分)。起動時に読み込み、
-//      未保存スロットは SAMPLE の同番号の音で鳴る (設計どおり)。
-//      SD 初期化は tab5_synth で実証済みの SPI → SDIO の順。
-//  (3) 保存/バンク切替の結果はステータス行に一時表示 (トースト)。
-//  ※ フレーズ録音 + ABC 出力は Phase 4 後半で実装する。
-// ------------------------------------------------------------
-//  3r8 の変更点 (2026-11-14, Hirouchi の指摘):
-//  ノート表示時の状態行 (最大 39 文字 ≒ 468px) が、クリア範囲
-//  (x<480) を超えて VOL 側に描かれ、短い表示に戻った後も
-//  その部分が消えずに残っていた。対策は 2 つ:
-//  (1) 状態行の書式を詰める (最大 32 文字 ≒ 384px に収める)。
-//  (2) drawStatus の最後で必ず drawVolume() を呼び、
-//      スライダー領域を描き直して残像が出ないようにする。
-// ------------------------------------------------------------
-//  3r7 の変更点 (2026-11-14, Hirouchi のリクエスト):
-//  (1) 操作系の問題が片付いたため、画面下部の診断行
-//      (ENC READY / BTN:...) を削除。NOTE 表示の 1 行だけを
-//      左に残す (診断はシリアルで追える)。
-//  (2) VOL/REV を上下 2 段から横並びに戻す (縦積みは誤操作が
-//      多かったため)。各バー幅は 380px、タッチ判定は画面下部
-//      全高 + 中央境界で明確に分ける。
-// ------------------------------------------------------------
-//  3r6 の変更点 (2026-11-14, Hirouchi のリクエスト):
-//  VOL/REV のバーが狭く微調整できないため、画面下部を再配置。
-//  左下の文字 (NOTE 表示とエンコーダ診断) は開発用の表示で
-//  完成版では残さないものなので、左端に圧縮して残しつつ
-//  (SW 生値は削除、Hz は整数化、開始位置を x=30 へ)、
-//  スライダー領域を x=560 からに広げ、VOL と REV を
-//  上下 2 段・バー幅 592px (従来 138px の約 4.3 倍) にした。
-// ------------------------------------------------------------
-//  3r5 の変更点 (2026-11-14, Hirouchi のリクエスト):
-//  (1) リバーブ追加。Freeverb 方式 (コムフィルタ 8 本 +
-//      オールパス 4 本) を全ボイスのミックス後に掛けるので、
-//      鍵盤を離した後も残響の尾が自然に消えていく。
-//      量は Params.reverb としてプリセットごとに初期値を持ち、
-//      画面右下の REV スライダーでいつでも調整できる
-//      (Phase 4 の SD プリセット保存にもそのまま含まれる)。
-//  (2) 右下のスライダー領域を VOL / REV の 2 本に分割。
-// ------------------------------------------------------------
-//  3r4 の変更点 (2026-11-14):
-//  (1) ボタンのレジスタを V1 プロトコルに合わせて修正。
-//      公式プロトコル文書で判明: このユニットは FW V1 で、
-//      ボタンは 0x50+ch の「1 チャンネル 1 バイト (0/1)」。
-//      0x62 のビットマスクは V2 専用で、V1 では未定義アドレス
-//      がスイッチの値 (0/1) を返すため B:0x00/0x01 に見えていた。
-//      CH8 ボタン (0x57) を毎ポーリング読み、押して離すと
-//      発音モード循環。全ボタンの生値は診断行に BTN:11111111
-//      の形で表示 (4 ポーリングに 1 回更新)。
-//      あわせて初期化成功時に FW 版数 (0xF0) をシリアルへ出力。
-//  (2) 波形生成に PolyBLEP を導入 (ノコギリと矩形 PWM)。
-//      素朴な波形の折り返し雑音 (音の粒) を抑える定番手法。
-//      三角波は元々折り返しが少ないため据え置き。
-// ------------------------------------------------------------
-//  3r3 の変更点 (2026-11-14, Hirouchi のリクエスト):
-//  スプラッシュのチェック行を「全項目が CHECKING (黄) で一斉に
-//  表示され、上から順に OK (緑) へ変わっていく」形に変更。
-//  SPEAKER / DISPLAY / TOUCH は 1.2 秒間隔、8ENCODER は実時間の
-//  ウォームアップ完了で最後に OK になる。音声・ボタンまわりは
-//  3r2 と同一 (ボタンのレジスタ特定は button_probe で調査中)。
-// ------------------------------------------------------------
-//  3r2 の変更点 (2026-11-14):
-//  (1) 起動スプラッシュのチェック行を段階表示に (Hirouchi の
-//      演出リクエスト): SPEAKER / DISPLAY / TOUCH が等間隔で
-//      CHECKING (黄) → OK (緑) と進み、8ENCODER だけ本物の
-//      ウォームアップ時間で最後に OK になる。
-//  (2) 音声生成のオーバーラン対策 (Phase 3 の動画解析で特定:
-//      50ms チャンクの生成に約 86ms かかり供給が枯れていた)。
-//      原因は 1 サンプルあたり powf 3 回。音程はチャンク毎に
-//      1 回、ベンド倍率とフィルタ係数は 16 サンプル毎のブロック
-//      更新 + 線形補間に変更 (powf は約 6600 回 → 約 300 回)。
-//  (3) つまみ 8 プッシュの取りこぼし対策: 500ms の時間判定を
-//      廃止し「押して離せば切替」に単純化。ボタン読みは
-//      ポーリングの先頭と末尾の 2 回に増やし、状態表示に
-//      ボタンの生バイト (B:0x..) を追加 (ビット対応の目視検証用)。
-// ------------------------------------------------------------
-//  3r の変更点 (2026-11-14, Hirouchi の発案): 起動直後は鍵盤を
-//  出さず、タイトル + 昔のコンピュータ風チェック表示の
-//  スプラッシュにする。8Encoder のウォームアップ (約 10 秒) を
-//  そのまま「Now warming up...」の演出に使い、初期化が成功して
-//  LED が全点灯するタイミングで「I2C OK!」→ 鍵盤画面へ移行。
-//  ウォームアップ中はタッチでスキップも可能 (従来動作に戻る)。
-//  音声・演奏まわりのロジックは Phase 3 と同一。
-// ------------------------------------------------------------
-//  Phase 3 の変更点 (2026-11-14):
-//  (1) 反応の鈍さ・離鍵後の残響・ブブブブという断続音の対策。
-//      原因は loop() がエンコーダ読み (1 回約 300ms) に占有され、
-//      タッチ処理が数 Hz に落ちていたこと。対策としてエンコーダ
-//      処理を専用タスク (core 0) に分離し、loop() をタッチ専念に
-//      戻した。表示更新はフラグ経由で loop() が行う (描画は
-//      loop() のみ)。エンコーダの取引手順は 2r4 の実証どおり。
-//  (2) 発音モード MONO / POLY / UNISON を実装。UI からの指示は
-//      ノートイベントキューに変更し、音声タスク側でボイス
-//      割り当て (POLY は空き優先→最も静かなボイスをスティール、
-//      UNISON は 5 ボイスをデチューンで重ねる)。モード切替は
-//      つまみ 8 の短押し (POLY→UNISON→MONO と循環)。
-//  (3) 画面右下に音量スライダー (設計メモ: VOLUME は画面側)。
-//  (4) 出力の硬いクリップをソフトクリップに (歪み対策)。
-//  (5) ヘッダにモード表示と、プリセットから編集したら * 印。
-// ------------------------------------------------------------
-//  2r4 の変更点 (2026-11-14): 2r3 の診断結果を受けた読み方の修正。
-//  2r3 の実機結果: LED 書き込みは毎回成功 (カウント 1 の瞬間に
-//  CH1 赤 LED が点灯)、しかし読み取りは got=0 err=4 で全滅が
-//  継続。err=4 はバスが詰まった状態で出るコードであり、0r9 と
-//  残っていた違いは「32 バイト一括読み」と「トランザクション
-//  間隔の短さ」。一括読みがバスを詰まらせ、直後の CH 別読みが
-//  err=4 になる流れが最有力と判断し、2r4 では:
-//  ・カウンタ読みは CH 別 4 バイト読みのみ (一括読み廃止)
-//  ・LED 書き込みの後に 50ms、CH 読みの間に 20ms の間隔を入れ、
-//    0r9 の緩やかなトランザクション間隔に戻す
-//  ・読み失敗時はバスクリアしてから待機に入る
-//  ・診断行は W err と RD got/err を 1 行に集約 (上書きで
-//    途中の段階が消えないように)
-// ------------------------------------------------------------
-//  2r3 の変更点 (2026-11-14): ENC が初期化できない件の切り分け。
-//  反省点: 0r9 で実証した読み取り前の待ちは 10ms だったのに、
-//  Phase 2 系ではポーリング速度を優先して 3ms → 6ms に縮めて
-//  いた。記録した実証レシピは「約10ms」であり、ここを勝手に
-//  変えたのは誤り。2r3 では 10ms に戻す (カウンタはユニット側
-//  ハードウェアに溜まるので、ポーリング間隔を 100ms に伸ばし
-//  てもクリックは取りこぼさない)。
-//  あわせて初期化の診断を画面にも出す: 最初の接触は 0r9 と
-//  同じ LED 書き込みから始め、各段階の err と受信バイト数
-//  (got) をステータス行 2 行目に表示する。LEDW err=0 で
-//  READ got=0 なら「応答はあるがデータが来ない」= 待ち時間
-//  や読み方側の問題、LEDW から err が立つなら電源・接触・
-//  バス側の問題、と写真 1 枚で切り分けられる。
-// ------------------------------------------------------------
-//  2r2 の変更点 (2026-11-14): 2r の実機テストで残った2件の修正。
-//  (A) 鍵を押しても音が出ない件: 容疑は VCF (Chamberlin SVF) の
-//      発散。起動プリセット SAW LEAD は変調後のカットオフが
-//      最大級で、係数が安定域を超えるとフィルタ状態が発散し、
-//      NaN 化して恒常的に無音になる (RISC-V の NaN→int 変換は
-//      DC になる)。対策: 変調後カットオフの上限 9000→7000、
-//      係数上限 1.2→0.8、それでも壊れたら検出して状態を
-//      リセットする NaN ガードをチャンク毎に追加。
-//  (B) ENC が OK にならない件: 初期化の読み取りが全滅して
-//      10 秒ループを繰り返していた。10 秒ごとの再試行では
-//      ユニットに十分な「静かな時間」を与えられない可能性を
-//      考え、段階方式に変更: 失敗1回目→電源入れたまま +15 秒
-//      静かに待つ / 2回目以降→電源を入れ直して 20 秒待つ。
-//      再テスト時は事前にユニットを 30 秒以上抜いて休ませ、
-//      挿してから Tab5 をリセットして電源投入と静寂タイマを
-//      同期させること (手順は納品メッセージ参照)。
-// ------------------------------------------------------------
-//  2r の変更点 (2026-11-14): 初回実機テストで判明した3件の修正。
-//  (1) 画面が縦向き (720x1280) のまま描画され、1280 幅の UI の
-//      右側が切れていた → setup で setRotation(1) を明示する
-//      (0r8/0r9 では入れていたのに Phase 2 で落としていた)。
-//      タッチ座標系もこれで想定どおりに揃う。
-//  (2) つまみが効かない件への備え: カウンタ読みを自己回復式に
-//      した。32 バイト一括読みが失敗したら、その場でチャンネル
-//      別 4 バイト読み (0r9 で実証済みの形) に切り替えて続行
-//      する。読み取り前の待ちも 3ms → 6ms に戻した。
-//  (3) 初期化時の読み取りリトライを追加 (3 回まで)。
-// ------------------------------------------------------------
-//  メモ「フェーズ案」の Phase 2。Phase 1r2 (モノシンセ最小構成
-//  + ベンド平滑化 + 鍵盤間隔) を土台に、以下を追加する。
+//  ■ 必要ライブラリ (Arduino IDE のライブラリマネージャ)
+//    M5Unified (M5GFX を含む)
+//    EspUsbHost (USB MIDI ホスト用)
+//    ※ USB ホスト機能のため ESP32 コア 3.3.1 以降が必要
+//      (M5Stack ボードパッケージを新しく保つこと)
+//  ボード: M5Tab5
 //
-//  ・8Encoder (U153) を全パラメータに接続 (バンクA/B は本体の
-//    トグルスイッチで切替、8番は両バンク共通で PRESET)
-//  ・音響エンジン拡張: レゾナンス付き VCF (2極 SVF)、ADSR
-//    (A/D/R はつまみ、S はプリセット値)、LFO → カットオフ、
-//    VCO2 デチューン + OSC MIX、PWM、ノイズ、グライド
-//  ・見本プリセット 8 種を内蔵し、8番つまみの回転で即切替
-//  ・エンジンは引き続き MONO (5ボイスプールの voice[0])。
-//    POLY / UNISON とプッシュ操作 (モード切替・保存) は
-//    Phase 3 以降、SD 保存と ABC 録音は Phase 4 (メモ通り)
+//  ■ 操作の概要
+//    8Encoder のトグルでつまみバンク A (演奏) / B (音作り)
+//    を切替。つまみ 8 は両バンク共通の PRESET 操作で、
+//    回転 = 今いる組 (1-8 / 9-16) の中でプリセット切替、
+//    短押し = 発音モード切替、長押し = USER へ保存。
+//    組の切替は画面の GRP ボタン、出典 (SAMPLE / USER) の
+//    切替は SAMPLE / USER ボタン。
+//    画面左端はピッチベンドスライダ (±2 半音)。
 //
-//  ★ 8Encoder の作法 (2026-11-14 Phase 0r8/0r9 で実証済み):
-//    1. 電源投入後 10 秒間は I2C を一切触らない (Wire.begin
-//       すら呼ばない)。起動直後に話しかけるとユニットが固まる。
-//       → 本スケッチでは電源投入だけ先に行い、鍵盤と音は即時
-//         使用可能。つまみは 10 秒後に自動で有効になる
-//         (画面右上に ENC: WAIT n と表示)。
-//    2. 読み取りは STOP-start 方式 (endTransmission(true) で
-//       STOP を打ち、数 ms 空けてから requestFrom)。
-//       リピーテッドスタートだと 0 バイトしか返らない。
-//    3. 失敗が続く場合はバスクリア → それでもダメなら
-//       setExtOutput でユニットの電源を入れ直し、再度 10 秒
-//       待つ (0r9 の復旧ラダーを移植)。
+//  ■ 電源の注意 (USB MIDI 使用時)
+//    キーボードへの給電は Tab5 の USB-A (5V) から行われ
+//    る。Tab5 自体も最大約 2.6W を使うため、PC の USB
+//    給電では不足することがある。キーボードを使うときは
+//    5V / 2A 以上の AC アダプタ給電を推奨する。
 //
-//  つまみ割り当て (メモ 2026-11-09 確定):
-//    バンクA (ライブ): 1 CUTOFF 2 RESONANCE 3 F-ENV 4 DECAY
-//                      5 LFO RATE 6 LFO DEPTH 7 GLIDE 8 PRESET
-//    バンクB (音作り): 1 WAVE 2 DETUNE 3 OSC MIX 4 PWM
-//                      5 ATTACK 6 RELEASE 7 NOISE 8 PRESET
-//    バンクは LED 色でも区別 (A=オレンジ, B=青)。
-//    カウントは 1 クリック ±2 で増減するのがこのユニットの
-//    仕様 (文献確認済み)。内部で 2 で割ってクリックに直す。
-//
-//  未確定事項 (実機で確認してほしい点):
-//    ・トグルスイッチのビット: レジスタ 0x60 の bit0 で
-//      バンクを判定している。画面下部に SW:0xNN と生値を
-//      表示するので、トグルを倒した方向と画面の BANK 表示
-//      が逆だったら教えてほしい (1行で直せる)。
-//    ・カウンタ読みは CH 別 4 バイト読みのみ (32 バイト一括
-//      読みはバスを詰まらせる疑いが濃厚なため 2r4 で廃止)。
-//
-//  注意 (過去の教訓):
-//  ・型・プロトタイプはファイル先頭に置く
-//  ・loop() から呼ばれる関数に大きな配列をローカルに置かない
+//  ■ 実装メモ
+//    ・8Encoder は電源投入直後の I2C アクセスで固まるため、
+//      起動後約 10 秒間 I2C に一切触らない (Wire.begin も
+//      しない)。その間も鍵盤と USB MIDI は演奏できる。
+//      読み出しは STOP を挟む方式でレジスタごとに行う。
+//    ・M5.Speaker.playRaw はデータをコピーせずポインタを
+//      キューに入れるだけなので、チャンネル 0 に固定し、
+//      isPlaying(0) < 2 を確認してからバッファを描く。
+//    ・USB MIDI のノートは仮想タッチ ID (1000+ノート番号)
+//      でタッチ鍵盤と同じ経路に流す。タッチ整合処理の対象
+//      は実タッチ ID のみに限定している。
 // ============================================================
 
 #include <M5Unified.h>
+#include "EspUsbHost.h"  // USB MIDI ホスト (EspUsbHost ライブラリ)
 #include <Wire.h>
 #include <FS.h>
 #include <SPI.h>
@@ -393,9 +96,11 @@ struct ActiveKey {
 };
 
 // ノートイベント (UI → 音声タスク)。type: EV_OFF=0 / EV_ON=1
+// midi: 1r3 で追加。USB MIDI 由来なら 1 (5r2 再ゲートガードの対象外)
 struct NoteEvent {
   volatile int8_t type;
   volatile int8_t note;
+  volatile int8_t midi;
 };
 
 // ボイス (音声タスクが所有。Phase 2 では audioTask 内にあったが、
@@ -440,11 +145,16 @@ static void synthNoteOff(void);
 static void pushEvent(int type, int note);
 static void trigVoice(Voice& v, int note, bool glideSnap);
 static void relVoice(Voice& v, float releaseSec);
-static void applyNoteEvent(int type, int note, bool glideSnap,
+static void applyNoteEvent(int type, int note, bool fromMidi, bool glideSnap,
                            float releaseSec, int mode);
 static void audioTask(void* arg);
 static void encTask(void* arg);
 static void consumeUiUpdates(void);
+static void consumeMidi(void);
+static void midiPush(int type, int note);
+static void onUsbDeviceConnected(const EspUsbHostDeviceInfo &device);
+static void onUsbDeviceDisconnected(const EspUsbHostDeviceInfo &device);
+static void onUsbMidiMessage(const EspUsbHostMidiMessage &msg);
 static void drawSplash(void);
 static void updateSplash(void);
 static void drawVolume(void);
@@ -463,6 +173,7 @@ static void applyKnob(int ch, int clicks);
 static void encPollStep(void);
 static void encHandleBtn8(uint8_t v, uint32_t now);
 static void encBtn8Tick(uint32_t now);
+static void encBtn8Sample(void);
 static void setToast(const char* s, uint32_t durMs);
 static void sdLoadUserBank(void);
 static void doSavePreset(int slot);
@@ -475,7 +186,7 @@ static void encWriteLEDs(void);
 static bool encWriteBlk(uint8_t reg, const uint8_t* data, size_t len);
 static bool encReadSS(uint8_t reg, uint8_t* data, size_t len);
 static int32_t encLe32(const uint8_t* b);
-static bool encReadCounters(int32_t out[8]);
+static bool encReadCounters(int32_t out[8], void (*midCb)(void));
 static void setEncDiag(const char* s);
 static void encBusRecover(void);
 
@@ -483,7 +194,7 @@ static void encBusRecover(void);
 // フィールド順: cutoff, reso, fEnv, decay, sustain, attack, release,
 //               glide, wave, detune, oscMix, pwm, noise, lfoRate, lfoDepth,
 //               reverb
-static const Params PRESETS[8] = {
+static const Params PRESETS[16] = {
   // 1 PIANO (減算合成でのピアノ寄り: 速い減衰 + 控えめなフィルタ)
   {0.55f, 0.15f, 0.50f, 0.55f, 0.25f, 0.01f, 0.30f, 0.00f,
    0.00f, 0.50f, 0.00f, 0.50f, 0.00f, 0.00f, 0.00f, 0.25f},
@@ -508,16 +219,44 @@ static const Params PRESETS[8] = {
   // 8 NOISE FX (ノイズ中心 + 短い減衰)
   {0.50f, 0.70f, 0.60f, 0.50f, 0.00f, 0.01f, 0.40f, 0.00f,
    0.00f, 0.50f, 0.00f, 0.50f, 1.00f, 0.30f, 0.30f, 0.55f},
+  // 9 STRINGS (遅いアタック + デチューン + ゆっくりした揺れ。弦楽合奏寄り)
+  {0.60f, 0.15f, 0.10f, 0.40f, 0.90f, 0.60f, 0.60f, 0.00f,
+   0.00f, 0.62f, 0.60f, 0.50f, 0.00f, 0.15f, 0.12f, 0.55f},
+  // 10 BRASS (中アタック + 強い F-ENV。金管寄り)
+  {0.55f, 0.25f, 0.55f, 0.30f, 0.85f, 0.25f, 0.30f, 0.00f,
+   0.00f, 0.54f, 0.40f, 0.50f, 0.00f, 0.30f, 0.06f, 0.35f},
+  // 11 BELL (速い立ち上がり + 減衰のみ + 残響。ベル寄り)
+  {0.85f, 0.45f, 0.30f, 0.70f, 0.00f, 0.01f, 0.50f, 0.00f,
+   0.50f, 0.50f, 0.00f, 0.50f, 0.00f, 0.00f, 0.00f, 0.60f},
+  // 12 SUB BASS (低いカットオフ + デチューンなし。沈んだ低音)
+  {0.25f, 0.20f, 0.20f, 0.25f, 0.70f, 0.01f, 0.15f, 0.10f,
+   0.00f, 0.50f, 0.00f, 0.50f, 0.00f, 0.00f, 0.00f, 0.05f},
+  // 13 PLUCK (F-ENV のスナップ + 短い減衰。爪弾き寄り)
+  {0.65f, 0.45f, 0.70f, 0.20f, 0.10f, 0.01f, 0.12f, 0.00f,
+   0.00f, 0.50f, 0.30f, 0.50f, 0.00f, 0.00f, 0.00f, 0.20f},
+  // 14 FC (ファミコンの矩形波の素の音寄り: 矩形 50% デューティ、
+  // フィルタ全開、サステイン全開、ビブラートなし、ドライ。
+  // POLY で 2 音鳴らすとバイナリーランド風の 2 声ハーモニー)
+  {1.00f, 0.00f, 0.00f, 0.10f, 1.00f, 0.01f, 0.08f, 0.00f,
+   0.50f, 0.50f, 0.00f, 0.50f, 0.00f, 0.00f, 0.00f, 0.00f},
+  // 15 ELEC PIANO (矩形波 + 中減衰。エレピ寄り)
+  {0.60f, 0.10f, 0.25f, 0.60f, 0.35f, 0.01f, 0.35f, 0.00f,
+   0.50f, 0.52f, 0.30f, 0.50f, 0.00f, 0.35f, 0.15f, 0.35f},
+  // 16 CHOIR PAD (PWM + 非常に遅いアタック + 長いリリース + 残響)
+  {0.45f, 0.20f, 0.05f, 0.30f, 0.90f, 0.70f, 0.80f, 0.05f,
+   0.50f, 0.58f, 0.50f, 0.65f, 0.00f, 0.25f, 0.15f, 0.65f},
 };
-static const char* PRESET_NAMES[8] = {
+static const char* PRESET_NAMES[16] = {
   "PIANO", "ORGAN", "FUNK BASS", "SAW LEAD",
-  "SQUARE LEAD", "PWM PAD", "UNISON FAT", "NOISE FX"
+  "SQUARE LEAD", "PWM PAD", "UNISON FAT", "NOISE FX",
+  "STRINGS", "BRASS", "BELL", "SUB BASS",
+  "PLUCK", "FC", "ELEC PIANO", "CHOIR PAD"
 };
 
 // ---------------- Phase 4: SD と USER バンク ----------------
 static int g_pbank = 0;              // プリセットバンク: 0=SAMPLE / 1=USER
-static Params g_userBank[8];         // USER バンクの音 (SD から読み込み)
-static bool g_userSaved[8] = {false, false, false, false, false, false, false, false};
+static Params g_userBank[16];        // USER バンクの音 (SD から読み込み)
+static bool g_userSaved[16] = {};
 static bool g_sdReady = false;
 static fs::FS* g_fs = nullptr;
 static const char* g_sdMode = "none";
@@ -538,10 +277,13 @@ static bool initSD(void) {
   return false;
 }
 
-// USER バンクファイル: マジック 4B + 保存フラグ 8B + Params 8 個
+// USER バンクファイル (Preset16): 新形式は マジック "U16P" 4B +
+// 保存フラグ 16B + Params 16 個。旧形式 ("U8P1", フラグ 8B +
+// Params 8 個) も読み込め、先頭 8 スロットとして引き継ぐ。
 static const char* USER_FILE = "/analog_user.bin";
-static const int USER_FILE_SIZE = 4 + 8 + (int)sizeof(Params) * 8;
-static uint8_t s_bankImg[4 + 8 + sizeof(Params) * 8];
+static const int USER_FILE_SIZE = 4 + 16 + (int)sizeof(Params) * 16;
+static const int USER_FILE_SIZE_V1 = 4 + 8 + (int)sizeof(Params) * 8;
+static uint8_t s_bankImg[4 + 16 + sizeof(Params) * 16];
 
 static void sdLoadUserBank(void) {
   if (!initSD()) {
@@ -555,22 +297,32 @@ static void sdLoadUserBank(void) {
     Serial.println("[P4] no USER bank file yet");
     return;
   }
-  if ((int)f.size() != USER_FILE_SIZE || f.read(s_bankImg, USER_FILE_SIZE) != USER_FILE_SIZE ||
-      memcmp(s_bankImg, "U8P1", 4) != 0) {
+  int sz = (int)f.size();
+  bool isV2 = (sz == USER_FILE_SIZE);
+  bool isV1 = (sz == USER_FILE_SIZE_V1);
+  if ((!isV1 && !isV2) || f.read(s_bankImg, sz) != sz ||
+      (isV2 && memcmp(s_bankImg, "U16P", 4) != 0) ||
+      (isV1 && memcmp(s_bankImg, "U8P1", 4) != 0)) {
     f.close();
     Serial.println("[P4] USER bank file invalid, ignored");
     return;
   }
   f.close();
-  for (int i = 0; i < 8; i++) g_userSaved[i] = s_bankImg[4 + i] != 0;
-  memcpy(g_userBank, s_bankImg + 12, sizeof(Params) * 8);
-  Serial.println("[P4] USER bank loaded");
+  if (isV2) {
+    for (int i = 0; i < 16; i++) g_userSaved[i] = s_bankImg[4 + i] != 0;
+    memcpy(g_userBank, s_bankImg + 20, sizeof(Params) * 16);
+    Serial.println("[P4] USER bank loaded (16 slots)");
+  } else {
+    for (int i = 0; i < 8; i++) g_userSaved[i] = s_bankImg[4 + i] != 0;
+    memcpy(g_userBank, s_bankImg + 12, sizeof(Params) * 8);
+    Serial.println("[P4] USER bank loaded (v1 file, 8 slots)");
+  }
 }
 
 static bool sdWriteUserBank(void) {
-  memcpy(s_bankImg, "U8P1", 4);
-  for (int i = 0; i < 8; i++) s_bankImg[4 + i] = g_userSaved[i] ? 1 : 0;
-  memcpy(s_bankImg + 12, g_userBank, sizeof(Params) * 8);
+  memcpy(s_bankImg, "U16P", 4);
+  for (int i = 0; i < 16; i++) s_bankImg[4 + i] = g_userSaved[i] ? 1 : 0;
+  memcpy(s_bankImg + 20, g_userBank, sizeof(Params) * 16);
   g_fs->remove(USER_FILE);  // SD ライブラリの FILE_WRITE は追記のため先に消す
   File f = g_fs->open(USER_FILE, FILE_WRITE);
   if (!f) return false;
@@ -651,6 +403,31 @@ static volatile int g_evHead = 0, g_evTail = 0;
 static volatile int g_voiceMode = MODE_MONO;  // 発音モード (つまみ8短押しで変更)
 static volatile float g_cmdBend = 0.0f;  // ピッチベンド (半音単位, ±2)
 
+// ---------------- USB MIDI (Phase 1) ----------------
+// コールバックは EspUsbHost のタスクで動くので、ノートは専用リングに
+// 入れるだけにし、実際の keyOn/keyOff は loop() の consumeMidi() が行う
+// (描画とイベントキューへのアクセスを loop() に一本化する既存設計に合わせる)。
+// MIDI ノートは仮想タッチ ID (1000+note) で g_activeKeys に載せる。
+static EspUsbHost usb;
+struct MidiEv {
+  volatile int8_t type;  // EV_ON / EV_OFF
+  volatile int8_t note;
+};
+static MidiEv g_midiQ[64];
+static volatile int g_midiHead = 0, g_midiTail = 0;
+static volatile bool g_midiDisc = false;      // 切断の後始末依頼 (loop へ)
+static volatile bool g_midiBendDirty = false; // ベンド表示の更新依頼 (loop へ)
+static bool g_usbOk = false;                  // usb.begin() 成功 (表示用)
+
+// (Phase 1r1〜1r4 の診断カウンタは完成版で撤去)
+
+// Phase 1r2: MIDI ノートの最小ゲート (短いノートの ON/OFF 同時消滅対策)。
+// consumeMidi() (loop) 専用。OFF が早すぎる間だけ保留する。
+static const uint32_t MIDI_MIN_GATE_MS = 100;
+static uint32_t g_midiOnMs[128] = {0};   // ノート別の keyOn 時刻 (0=未発音)
+static int8_t g_pendOffNote[16];         // 保留中 OFF のノート (-1=空き)
+static uint32_t g_pendOffDue[16];        // 保留中 OFF の適用時刻
+
 // ボイスプール (音声タスクが所有)
 static Voice s_voices[5];
 static uint32_t s_ageCounter = 0;
@@ -660,7 +437,7 @@ static float s_fcStep[5] = {0, 0, 0, 0, 0};
 
 // 現在のパラメータ (loop 側で書き、音声タスクがチャンク毎にコピー)
 static Params g_params = PRESETS[3];  // 起動時は SAW LEAD
-static int g_preset = 3;              // PRESETS のインデックス (0..7)
+static int g_preset = 3;              // PRESETS のインデックス (0..15)
 static int g_bank = 0;                // 0=A, 1=B (トグルスイッチで切替)
 
 // ---------------- 8Encoder ドライバ ----------------
@@ -708,6 +485,7 @@ static int g_curNote = -1;
 static const int VOL_X = 480, VOL_Y = 660, VOL_H = 60;  // スライダー領域の左端 (3r7)
 static const int PB_Y = 20, PB_H = 34, PB_W = 140;   // バンク切替ボタンの大きさ (4r)
 static const int PB1_X = 690, PB2_X = 840;           // SAMPLE / USER ボタンの左端 (4r)
+static const int GB_X = 995, GB_W = 150;             // プリセットグループ切替ボタン (Preset16)
 static const int SL1_X = 480, SL2_X = 890, SL_BAR_W = 380;  // VOL / REV のバー (3r7)
 static const int SL_MID_X = 875;  // VOL/REV タッチ判定の境界 (3r7)
 static int g_volume = 110;
@@ -729,6 +507,21 @@ void setup() {
   M5.Power.setExtOutput(true);
   g_encPowerMs = millis();
   g_encTryMs = g_encPowerMs + ENC_QUIET_MS;
+  // USB MIDI Phase 1: USB-A のホスト開始 (5V は上の setExtOutput で供給済み。
+  // I2C には触らないので 8Encoder のクワイエットブートと競合しない)
+  usb.onDeviceConnected(onUsbDeviceConnected);
+  usb.onDeviceDisconnected(onUsbDeviceDisconnected);
+  usb.onMidiMessage(onUsbMidiMessage);
+  {
+    EspUsbHostConfig usbCfg;
+    usbCfg.port = ESP_USB_HOST_PORT_HIGH_SPEED;  // Tab5 の USB-A は HS 側
+    g_usbOk = usb.begin(usbCfg);
+    if (!g_usbOk) {
+      Serial.printf("[USB] begin failed: %s\n", usb.lastErrorName());
+    } else {
+      Serial.println("[USB] host started (HS port)");
+    }
+  }
   M5.Speaker.begin();
   M5.Speaker.setVolume(g_volume);
   // Phase 5: サンプル用バッファ (PSRAM 優先、4 秒 @16kHz)
@@ -752,6 +545,7 @@ void loop() {
   } else {
     handlePoints();
     consumeUiUpdates();
+    consumeMidi();  // USB MIDI Phase 1
     consumePhase4();
     if (g_recording) {  // 録音中は経過表示を定期更新 (Phase 4b)
       static uint32_t lastRecDraw = 0;
@@ -1312,9 +1106,9 @@ static void loadPreset(int idx) {
 
 // つまみ ch (0..7) が clicks クリック分回った
 static void applyKnob(int ch, int clicks) {
-  if (ch == 7) {  // PRESET (両バンク共通): 1クリックで 1 つ送る
-    int np = (g_preset + clicks) % 8;
-    if (np < 0) np += 8;
+  if (ch == 7) {  // PRESET (両バンク共通): グループ (8 個) の中で回す
+    int base = (g_preset / 8) * 8;
+    int np = base + ((g_preset - base + clicks) % 8 + 8) % 8;
     if (np != g_preset) loadPreset(np);
     return;
   }
@@ -1367,11 +1161,13 @@ static int32_t encLe32(const uint8_t* b) {
 // カウンタ 8ch 分を読む。CH 別 4 バイト読みのみ (0r9 で実証済みの形)。
 // 32 バイト一括読みは 2r4 で廃止 (バスを詰まらせる疑い)。CH 間にも
 // 間隔を入れ、0r9 の緩やかなトランザクション間隔に寄せる。
-static bool encReadCounters(int32_t out[8]) {
+static bool encReadCounters(int32_t out[8], void (*midCb)(void)) {
   for (int ch = 0; ch < 8; ch++) {
     uint8_t b[4];
     if (!encReadSS((uint8_t)(ch * 4), b, 4)) return false;
     out[ch] = encLe32(b);
+    // 1r3: 奇数 ch の後にボタン 8 を割り込みサンプリング (検出間隔 ~50ms)
+    if (midCb && (ch & 1)) midCb();
     if (ch < 7) delay(20);
   }
   return true;
@@ -1449,7 +1245,7 @@ static void encTryInit(void) {
                 wErr, wOk ? "OK" : "NG");
   delay(50);  // 書き込みの直後には読みを始めない (0r9 には常に間隔があった)
   int32_t seed[8];
-  bool ok = encReadCounters(seed);
+  bool ok = encReadCounters(seed, nullptr);
   snprintf(msg, sizeof(msg), "INIT#%d W err=%u RD got=%d err=%u",
            g_encInitFails + 1, wErr, g_encLastGot, g_encLastErr);
   setEncDiag(msg);
@@ -1530,6 +1326,14 @@ static void encBtn8Tick(uint32_t now) {
   }
 }
 
+// 1r3: カウンタ読み取りの合間にボタン 8 をサンプリングする。
+// 読み失敗は無視する (本読み側の成否判定とバス復旧に任せる)。
+static void encBtn8Sample(void) {
+  uint8_t b = 0;
+  if (encReadSS(0x57, &b, 1)) encHandleBtn8(b, millis());
+  encBtn8Tick(millis());
+}
+
 static void encPollStep(void) {
   uint32_t now = millis();
   if (g_encState == ENC_WARM) {
@@ -1556,7 +1360,7 @@ static void encPollStep(void) {
   delay(20);
   int32_t cur8[8];
   uint8_t swb = 0;
-  bool okC = encReadCounters(cur8);
+  bool okC = encReadCounters(cur8, encBtn8Sample);
   delay(20);
   bool okS = encReadSS(0x60, &swb, 1);
   if (!okC || !okS || !okB8) {
@@ -1611,26 +1415,152 @@ static void encTask(void* arg) {
 }
 
 // ---------------- UI → 音声への指示 (イベントキュー) ----------------
-static void pushEvent(int type, int note) {
+static void pushEvent(int type, int note, bool midi) {
   recCapture(type, note);  // Phase 4b: 録音中ならイベントを記録
   int h = g_evHead;
   int nh = (h + 1) & 31;
-  if (nh == g_evTail) g_evTail = (g_evTail + 1) & 31;  // 満杯なら最古を捨てる
+  if (nh == g_evTail) { g_evTail = (g_evTail + 1) & 31; }  // 満杯なら最古を捨てる
   g_evq[h].type = (int8_t)type;
   g_evq[h].note = (int8_t)note;
+  g_evq[h].midi = midi ? 1 : 0;
   g_evHead = nh;
 }
 
 // MONO / UNISON 用: 「今鳴らすべき 1 音」の開始と停止
-static void synthNoteOn(int note) {
-  pushEvent(EV_ON, note);
+static void synthNoteOn(int note, bool midi) {
+  pushEvent(EV_ON, note, midi);
   g_curNote = note;
   drawStatus();
 }
-static void synthNoteOff(void) {
-  pushEvent(EV_OFF, g_curNote);
+static void synthNoteOff(bool midi) {
+  pushEvent(EV_OFF, g_curNote, midi);
   g_curNote = -1;
   drawStatus();
+}
+
+// ---------------- USB MIDI (Phase 1): コールバックと受渡し ----------------
+static void midiPush(int type, int note) {
+  int h = g_midiHead;
+  int nh = (h + 1) & 63;
+  if (nh == g_midiTail) return;  // 満杯なら落とす (保険)
+  g_midiQ[h].type = (int8_t)type;
+  g_midiQ[h].note = (int8_t)note;
+  g_midiHead = nh;
+}
+
+static void onUsbDeviceConnected(const EspUsbHostDeviceInfo &device) {
+  Serial.print("[USB] connected: ");
+  espUsbHostPrint(device);
+}
+
+static void onUsbDeviceDisconnected(const EspUsbHostDeviceInfo &device) {
+  Serial.print("[USB] disconnected: ");
+  espUsbHostPrint(device);
+  g_midiDisc = true;  // ノートの後始末は loop() 側で行う
+}
+
+static void onUsbMidiMessage(const EspUsbHostMidiMessage &msg) {
+  if (msg.status == 0) return;  // 空パケットは無視 (0r1 の知見)
+  uint8_t type = msg.status & 0xF0;
+  if (type == 0x90 && msg.data2 > 0) {
+    midiPush(EV_ON, msg.data1);
+  } else if (type == 0x80 || type == 0x90) {
+    midiPush(EV_OFF, msg.data1);  // Note Off / ベロシティ 0 の Note On
+  } else if (type == 0xE0) {
+    // ピッチベンド: -8192..+8191 → ±2 半音 (タッチスライダと同じ量)
+    int val = (int)(((uint16_t)msg.data2 << 7) | msg.data1) - 8192;
+    float b = val * (2.0f / 8192.0f);
+    if (b > 2.0f) b = 2.0f;
+    if (b < -2.0f) b = -2.0f;
+    g_cmdBend = b;
+    g_bend = b;
+    g_midiBendDirty = true;
+  }
+  // CC#1 などは Phase 2 で対応
+}
+
+// 1r2: MIDI ノートを実際に離す (保留の後始末もここを通る)
+static void midiApplyOff(int note) {
+  keyOffById(1000 + note);
+  if (note >= 0 && note < 128) g_midiOnMs[note] = 0;
+}
+
+// 1r2: 保留中の OFF を探す (-1 = 無し)
+static int pendOffFind(int note) {
+  for (int i = 0; i < 16; ++i) if (g_pendOffNote[i] == note) return i;
+  return -1;
+}
+
+// loop() から呼ぶ: MIDI リングを既存の鍵盤ロジックへ流す
+static void consumeMidi(void) {
+  static bool pendInit = false;
+  if (!pendInit) {
+    pendInit = true;
+    for (int i = 0; i < 16; ++i) g_pendOffNote[i] = -1;
+  }
+  uint32_t now = millis();
+  if (g_midiDisc) {
+    g_midiDisc = false;
+    // 保留 OFF は全部即適用し、MIDI 由来で押さえたままのキーを全部離す
+    for (int i = 0; i < 16; ++i) {
+      if (g_pendOffNote[i] >= 0) {
+        midiApplyOff(g_pendOffNote[i]);
+        g_pendOffNote[i] = -1;
+      }
+    }
+    for (int i = 0; i < 10; ++i) {
+      if (g_activeKeys[i].active && g_activeKeys[i].id >= 1000) {
+        keyOffById(g_activeKeys[i].id);
+      }
+    }
+    for (int n = 0; n < 128; ++n) g_midiOnMs[n] = 0;
+    g_midiTail = g_midiHead;  // 残っていたイベントも捨てる
+    g_cmdBend = 0.0f;
+    g_bend = 0.0f;
+    drawBend();
+  }
+  // 期限が来た保留 OFF を先に流す
+  for (int i = 0; i < 16; ++i) {
+    if (g_pendOffNote[i] >= 0 && (int32_t)(now - g_pendOffDue[i]) >= 0) {
+      int n = g_pendOffNote[i];
+      g_pendOffNote[i] = -1;
+      midiApplyOff(n);
+    }
+  }
+  while (g_midiTail != g_midiHead) {
+    int t = g_midiQ[g_midiTail].type;
+    int n = g_midiQ[g_midiTail].note;
+    g_midiTail = (g_midiTail + 1) & 63;
+    if (t == EV_ON) {
+      int pi = pendOffFind(n);
+      if (pi >= 0) {  // 同じ音の再打鍵: 保留 OFF を先に確定させて打ち直す
+        g_pendOffNote[pi] = -1;
+        midiApplyOff(n);
+      }
+      keyOn(n, 1000 + n);
+      if (n >= 0 && n < 128) g_midiOnMs[n] = now;
+    } else {
+      // 最小ゲート: ON から MIDI_MIN_GATE_MS 以内の OFF は保留する。
+      // ON と OFF が同じ 50ms チャンクで処理されると音が消えるため。
+      if (n >= 0 && n < 128 && g_midiOnMs[n] != 0 &&
+          now - g_midiOnMs[n] < MIDI_MIN_GATE_MS && pendOffFind(n) < 0) {
+        int slot = -1;
+        for (int i = 0; i < 16; ++i) if (g_pendOffNote[i] < 0) { slot = i; break; }
+        if (slot >= 0) {
+          g_pendOffNote[slot] = (int8_t)n;
+          g_pendOffDue[slot] = g_midiOnMs[n] + MIDI_MIN_GATE_MS;
+        } else {
+          midiApplyOff(n);  // 保留枠が無ければ即離す
+        }
+      } else {
+        midiApplyOff(n);
+      }
+    }
+  }
+  if (g_midiBendDirty) {
+    g_midiBendDirty = false;
+    if (g_bendId < 0) drawBend();  // タッチで掴んでいないときだけ追随
+  }
 }
 
 // ---------------- 描画: 上部 (タイトル + プリセット + パラメータ) ----------------
@@ -1639,7 +1569,7 @@ static void drawTop(void) {
   M5.Display.setTextDatum(top_left);
   M5.Display.setTextSize(2);
   M5.Display.setTextColor(TFT_LIGHTGREY, TFT_BLACK);
-  M5.Display.drawString("tab5_analog Phase 5r3", 100, 4);
+  M5.Display.drawString("tab5_analog v2.0 + USB MIDI", 100, 4);
   // エンコーダ状態 (右寄せ)
   char enc[32];
   if (g_encState == ENC_WARM) {
@@ -1680,6 +1610,16 @@ static void drawTop(void) {
                             act ? TFT_DARKGREY : TFT_BLACK);
     M5.Display.drawString(b == 0 ? "SAMPLE" : "USER",
                           bx + (b == 0 ? 34 : 46), PB_Y + 9);
+  }
+  // プリセットグループ切替ボタン (Preset16): 現在の組を表示し、
+  // タップで 1-8 / 9-16 を切り替える (同じ枠番号のまま組だけ移動)
+  {
+    M5.Display.fillRect(GB_X, PB_Y, GB_W, PB_H, TFT_DARKGREY);
+    M5.Display.drawRect(GB_X, PB_Y, GB_W, PB_H, TFT_WHITE);
+    M5.Display.setTextSize(2);
+    M5.Display.setTextColor(TFT_YELLOW, TFT_DARKGREY);
+    M5.Display.drawString(g_preset < 8 ? "GRP 1-8" : "GRP 9-16",
+                          GB_X + 27, PB_Y + 9);
   }
   M5.Display.setTextSize(3);
   M5.Display.setTextColor(g_bank == 0 ? TFT_ORANGE : TFT_SKYBLUE, TFT_BLACK);
@@ -1836,15 +1776,18 @@ static void relVoice(Voice& v, float releaseSec) {
   v.gate = false;
 }
 
-static void applyNoteEvent(int type, int note, bool glideSnap,
+static void applyNoteEvent(int type, int note, bool fromMidi, bool glideSnap,
                            float releaseSec, int mode) {
   static int s_lastOffNote = -1;      // 5r2: ドロップアウト判定用
   static uint32_t s_lastOffMs = 0;
   if (type == EV_ON) {
     // 5r2: 同音の OFF から 150ms 以内の ON はタッチの一瞬の欠落と
     // みなし、再トリガしない。リリース中のボイスを再ゲートして
-    // 再生位置 (spos) とエンベロープを保持する
-    if (note == s_lastOffNote && (millis() - s_lastOffMs) < 150) {
+    // 再生位置 (spos) とエンベロープを保持する。
+    // 1r3: MIDI 由来は対象外 (キーボードの OFF は本物の離鍵であり、
+    // 直後の同音 ON は本物の再打鍵。再ゲートすると連打が繋がって
+    // 聞こえ、取りこぼしに見えるため)
+    if (!fromMidi && note == s_lastOffNote && (millis() - s_lastOffMs) < 150) {
       bool regated = false;
       for (int vi = 0; vi < 5; ++vi) {
         Voice& v = s_voices[vi];
@@ -1953,8 +1896,9 @@ static void audioTask(void* arg) {
     while (g_evTail != g_evHead) {
       int t = g_evq[g_evTail].type;
       int n = g_evq[g_evTail].note;
+      bool md = g_evq[g_evTail].midi != 0;
       g_evTail = (g_evTail + 1) & 31;
-      applyNoteEvent(t, n, glideSnap, releaseSec, mode);
+      applyNoteEvent(t, n, md, glideSnap, releaseSec, mode);
     }
     bend = g_cmdBend;
 
@@ -2421,11 +2365,11 @@ static void keyOn(int note, int id) {
   slot->seq = ++g_pressSeq;
   slot->active = true;
   if (g_voiceMode == MODE_POLY) {
-    pushEvent(EV_ON, note);
+    pushEvent(EV_ON, note, id >= 1000);
     g_curNote = note;
     drawStatus();
   } else {
-    synthNoteOn(note);  // MONO/UNISON: 最後に押した鍵が鳴る
+    synthNoteOn(note, id >= 1000);  // MONO/UNISON: 最後に押した鍵が鳴る
   }
   drawKeyByNote(note);
 }
@@ -2442,18 +2386,19 @@ static void keyOffById(int id) {
   }
   if (offNote < 0) return;
   if (g_voiceMode == MODE_POLY) {
-    pushEvent(EV_OFF, offNote);
+    pushEvent(EV_OFF, offNote, id >= 1000);
     if (offNote == g_curNote) { g_curNote = -1; drawStatus(); }
     return;
   }
   if (offNote != g_curNote) return;
   int best = -1;
+  int bestId = -1;
   uint32_t bestSeq = 0;
   for (const ActiveKey& k : g_activeKeys) {
-    if (k.active && k.seq > bestSeq) { bestSeq = k.seq; best = k.note; }
+    if (k.active && k.seq > bestSeq) { bestSeq = k.seq; best = k.note; bestId = k.id; }
   }
-  if (best >= 0) synthNoteOn(best);
-  else synthNoteOff();
+  if (best >= 0) synthNoteOn(best, bestId >= 1000);
+  else synthNoteOff(id >= 1000);
 }
 
 static int keyAtPoint(int x, int y) {
@@ -2511,7 +2456,10 @@ static void handlePoints(void) {
   }
 
   for (const ActiveKey& k : g_activeKeys) {
-    if (k.active && !idDown[k.id & 0xFF]) keyOffById(k.id);
+    // 1r4: 整合処理はタッチ由来のキーだけが対象。MIDI の仮想 ID
+    // (1000+note) を対象にすると、押下中タッチ集合に無いという
+    // 理由で MIDI ノートが発音直後に殺されてしまう。
+    if (k.active && k.id < 1000 && !idDown[k.id & 0xFF]) keyOffById(k.id);
   }
   if (g_bendId >= 0 && !idDown[g_bendId & 0xFF]) {
     g_bendId = -1;
@@ -2540,6 +2488,8 @@ static void handlePoints(void) {
     bool inPbS = (p.x >= PB1_X && p.x < PB1_X + PB_W &&
                   p.y >= PB_Y && p.y < PB_Y + PB_H);
     bool inPbU = (p.x >= PB2_X && p.x < PB2_X + PB_W &&
+                  p.y >= PB_Y && p.y < PB_Y + PB_H);
+    bool inGrp = (p.x >= GB_X && p.x < GB_X + GB_W &&
                   p.y >= PB_Y && p.y < PB_Y + PB_H);
     bool inRecBtn = (p.x >= REC_BTN_X && p.x < REC_BTN_X + REC_BTN_W &&
                      p.y >= TR_Y && p.y < TR_Y + TR_H);
@@ -2588,6 +2538,13 @@ static void handlePoints(void) {
         loadPreset(g_preset);
         setToast(want ? "PRESET BANK: USER" : "PRESET BANK: SAMPLE", 1500);
       }
+      continue;
+    }
+    if (p.pressed && inGrp) {
+      // グループ切替: 枠番号 (0..7) はそのまま、組だけを移動する
+      int np = (g_preset < 8) ? g_preset + 8 : g_preset - 8;
+      loadPreset(np);
+      setToast(np >= 8 ? "PRESET GROUP: 9-16" : "PRESET GROUP: 1-8", 1500);
       continue;
     }
     if (p.pressed && inRecBtn) { toggleRec(); continue; }
